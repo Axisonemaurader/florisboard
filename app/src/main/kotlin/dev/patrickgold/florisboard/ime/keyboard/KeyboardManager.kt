@@ -47,6 +47,8 @@ import dev.patrickgold.florisboard.ime.input.InputShiftState
 import dev.patrickgold.florisboard.ime.nlp.ClipboardSuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.PunctuationRule
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
+import dev.patrickgold.florisboard.ime.nlp.latin.AutocorrectCandidate
+import dev.patrickgold.florisboard.ime.text.key.KeyVariation
 import dev.patrickgold.florisboard.ime.onehanded.OneHandedMode
 import dev.patrickgold.florisboard.ime.popup.PopupMappingComponent
 import dev.patrickgold.florisboard.ime.text.composing.Composer
@@ -286,7 +288,45 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         }
     }
 
+    /** Last auto-applied correction, so an immediate backspace can undo it (Samsung/Gboard behaviour). */
+    private var lastAutocorrect: Pair<AutocorrectCandidate, String>? = null
+
+    /**
+     * Auto-commit the top autocorrect candidate, but only when it can cleanly replace the word being typed
+     * (a valid composing region whose text is exactly what the engine saw). Never appends blindly.
+     */
+    private fun autoCommitIfSafe(): SuggestionCandidate? {
+        val candidate = nlpManager.getAutoCommitCandidate() ?: return null
+        val content = editorInstance.activeContent
+        if (candidate is AutocorrectCandidate) {
+            // Never autocorrect URLs, emails, passwords, or fields that asked for no suggestions.
+            if (activeState.keyVariation != KeyVariation.NORMAL) return null
+            if (editorInstance.activeInfo.inputAttributes.flagTextNoSuggestions) return null
+            if (!content.composing.isValid || content.composingText != candidate.typed) return null
+        }
+        commitCandidate(candidate)
+        return candidate
+    }
+
+    private fun armRevert(candidate: SuggestionCandidate?, separator: String) {
+        lastAutocorrect = (candidate as? AutocorrectCandidate)
+            ?.takeIf { !it.isKeepTyped && it.text.toString() != it.typed }
+            ?.let { it to (it.text.toString() + separator) }
+    }
+
+    /** @return true if the backspace was consumed by undoing an auto-correction. */
+    private fun tryRevertAutocorrect(): Boolean {
+        val (candidate, committed) = lastAutocorrect ?: return false
+        lastAutocorrect = null
+        if (!editorInstance.replaceTextBeforeCursorIfMatches(committed, candidate.typed)) return false
+        candidate.sourceProvider?.let { provider ->
+            scope.launch { provider.notifySuggestionReverted(subtypeManager.activeSubtype, candidate) }
+        }
+        return true
+    }
+
     fun commitCandidate(candidate: SuggestionCandidate) {
+        lastAutocorrect = null
         scope.launch {
             candidate.sourceProvider?.notifySuggestionAccepted(subtypeManager.activeSubtype, candidate)
         }
@@ -427,6 +467,8 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             it.isManualSelectionModeStart = false
             it.isManualSelectionModeEnd = false
         }
+        if (unit == OperationUnit.CHARACTERS && tryRevertAutocorrect()) return
+        lastAutocorrect = null
         revertPreviouslyAcceptedCandidate()
         editorInstance.deleteBackwards(unit)
     }
@@ -539,8 +581,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
      * but skips handling changing to characters keyboard and double space periods.
      */
     fun handleHardwareKeyboardSpace() {
-        val candidate = nlpManager.getAutoCommitCandidate()
-        candidate?.let { commitCandidate(it) }
+        val candidate = autoCommitIfSafe()
         // Skip handling changing to characters keyboard and double space periods
         // TODO: this is whether we commit space after selecting candidate. Should be determined by SuggestionProvider
         if (!subtypeManager.activeSubtype.primaryLocale.supportsAutoSpace &&
@@ -554,8 +595,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
      * enabled by the user.
      */
     private fun handleSpace(data: KeyData) {
-        val candidate = nlpManager.getAutoCommitCandidate()
-        candidate?.let { commitCandidate(it) }
+        val candidate = autoCommitIfSafe()
         if (prefs.keyboard.spaceBarSwitchesToCharacters.get()) {
             when (activeState.keyboardMode) {
                 KeyboardMode.NUMERIC_ADVANCED,
@@ -580,31 +620,18 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         if (!subtypeManager.activeSubtype.primaryLocale.supportsAutoSpace &&
                 candidate != null) { /* Do nothing */ } else {
             editorInstance.commitText(KeyCode.SPACE.toChar().toString())
+            armRevert(candidate, " ")
         }
     }
 
     /**
      * Handles a [KeyCode.TOGGLE_INCOGNITO_MODE] event.
      */
-    private suspend fun handleToggleIncognitoMode() {
-        prefs.suggestion.forceIncognitoModeFromDynamic.set(!prefs.suggestion.forceIncognitoModeFromDynamic.get())
-        val newState = !activeState.isIncognitoMode
-        activeState.isIncognitoMode = newState
-        lastToastReference.get()?.cancel()
-        lastToastReference = WeakReference(
-            if (newState) {
-                appContext.showLongToast(
-                    R.string.incognito_mode__toast_after_enabled,
-                    "app_name" to appContext.getString(R.string.floris_app_name),
-                )
-            } else {
-                appContext.showLongToast(
-                    R.string.incognito_mode__toast_after_disabled,
-                    "app_name" to appContext.getString(R.string.floris_app_name),
-                )
-            }
-        )
+    private fun handleToggleIncognitoMode() {
+        // PRIVACY LOCK: incognito cannot be turned off.
+        activeState.isIncognitoMode = true
     }
+
 
     /**
      * Handles a [KeyCode.TOGGLE_AUTOCORRECT] event.
@@ -782,7 +809,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             KeyCode.VIEW_SYMBOLS2 -> activeState.keyboardMode = KeyboardMode.SYMBOLS2
             else -> {
                 if (activeState.imeUiMode == ImeUiMode.MEDIA) {
-                    nlpManager.getAutoCommitCandidate()?.let { commitCandidate(it) }
+                    autoCommitIfSafe()
                     editorInstance.commitText(data.asString(isForDisplay = false))
                     return@batchEdit
                 }
@@ -808,8 +835,9 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
                         KeyType.CHARACTER, KeyType.NUMERIC ->{
                             val text = data.asString(isForDisplay = false)
                             if (!UCharacter.isUAlphabetic(UCharacter.codePointAt(text, 0))) {
-                                nlpManager.getAutoCommitCandidate()?.let { commitCandidate(it) }
+                                autoCommitIfSafe()
                             }
+                            lastAutocorrect = null
                             editorInstance.commitChar(text)
                         }
                         else -> {
@@ -992,10 +1020,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
                 KeyCode.CLIPBOARD_SELECT_ALL -> {
                     editorInfo.isRichInputEditor
                 }
-                KeyCode.TOGGLE_INCOGNITO_MODE -> when (prefs.suggestion.incognitoMode.get()) {
-                    IncognitoMode.FORCE_OFF, IncognitoMode.FORCE_ON -> false
-                    IncognitoMode.DYNAMIC_ON_OFF -> !editorInfo.imeOptions.flagNoPersonalizedLearning
-                }
+                KeyCode.TOGGLE_INCOGNITO_MODE -> false // PRIVACY LOCK: never toggleable
                 KeyCode.LANGUAGE_SWITCH -> {
                     subtypeManager.subtypes.size > 1
                 }

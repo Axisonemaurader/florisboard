@@ -31,7 +31,6 @@ import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardFileStorage
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import dev.patrickgold.florisboard.ime.input.InputShiftState
-import dev.patrickgold.florisboard.ime.keyboard.IncognitoMode
 import dev.patrickgold.florisboard.ime.keyboard.KeyboardMode
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
 import dev.patrickgold.florisboard.ime.text.composing.Appender
@@ -118,13 +117,8 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
             //!instance.inputAttributes.flagTextAutoComplete &&
             //!instance.inputAttributes.flagTextNoSuggestions
         }
-        activeState.isIncognitoMode = when (prefs.suggestion.incognitoMode.get()) {
-            IncognitoMode.FORCE_OFF -> false
-            IncognitoMode.FORCE_ON -> true
-            IncognitoMode.DYNAMIC_ON_OFF -> {
-                editorInfo.imeOptions.flagNoPersonalizedLearning || prefs.suggestion.forceIncognitoModeFromDynamic.get()
-            }
-        }
+        // PRIVACY LOCK: incognito is permanently on. Not a setting, not a toggle.
+        activeState.isIncognitoMode = true
     }
 
     override fun handleSelectionUpdate(oldSelection: EditorRange, newSelection: EditorRange, composing: EditorRange) {
@@ -340,6 +334,22 @@ class EditorInstance(context: Context) : AbstractEditorInstance(context) {
      *
      * @return True on success, false if an error occurred or the input connection is invalid.
      */
+    /**
+     * Autocorrect revert: if the text right before the cursor is exactly [expected], replace it with [replacement].
+     * Returns false (and does nothing) if the text no longer matches, e.g. the user moved the cursor.
+     */
+    fun replaceTextBeforeCursorIfMatches(expected: String, replacement: String): Boolean {
+        val content = activeContent
+        if (activeInfo.isRawInputEditor || content.selection.isSelectionMode) return false
+        if (!content.textBeforeSelection.endsWith(expected)) return false
+        autoSpace.setInactive()
+        phantomSpace.setInactive()
+        runBlocking {
+            deleteAroundCursor(OperationUnit.CHARACTERS, OperationScope.BEFORE_CURSOR, n = expected.length)
+        }
+        return super.commitText(replacement)
+    }
+
     fun deleteBackwards(unit: OperationUnit): Boolean {
         val content = activeContent
         if (unit == OperationUnit.CHARACTERS) {

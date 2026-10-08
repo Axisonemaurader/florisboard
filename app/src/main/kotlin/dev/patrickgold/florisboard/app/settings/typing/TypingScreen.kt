@@ -87,12 +87,7 @@ fun TypingScreen() = FlorisScreen {
                 summary = stringRes(R.string.pref__suggestion__api30_inline_suggestions_enabled__summary),
                 visibleIf = { AndroidVersion.ATLEAST_API30_R },
             )
-            ListPreference(
-                prefs.suggestion.incognitoMode,
-                icon = ImageVector.vectorResource(id = R.drawable.ic_incognito),
-                title = stringRes(R.string.pref__suggestion__incognito_mode__label),
-                entries = enumDisplayEntriesOf(IncognitoMode::class),
-            )
+            // PRIVACY LOCK: incognito setting removed; it is always on.
         }
 
         PreferenceGroup(title = stringRes(R.string.pref__correction__title)) {

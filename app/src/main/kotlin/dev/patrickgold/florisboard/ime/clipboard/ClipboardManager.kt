@@ -232,7 +232,8 @@ class ClipboardManager(
      * Adds a new item to the clipboard history (if enabled).
      */
     private fun insertOrMoveBeginning(newItem: ClipboardItem) {
-        if (prefs.clipboard.historyEnabled.get()) {
+        // PRIVACY LOCK: clipboard history is never persisted.
+        if (false && prefs.clipboard.historyEnabled.get()) {
             val historyElement = currentHistory.all.firstOrNull { it.type == ItemType.TEXT && it.text == newItem.text }
             if (historyElement != null) {
                 moveToTheBeginning(

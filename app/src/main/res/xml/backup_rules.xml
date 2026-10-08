@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<full-backup-content>
-    <include
-        domain="root"
-        path="jetpref_datastore"/>
-    <include
-        domain="file"
-        path="ime"/>
-    <include
-        domain="database"
-        path="floris_user_dictionary"/>
-</full-backup-content>
+<!-- PRIVACY LOCK: nothing is ever included in cloud backup or device transfer. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="."/>
+        <exclude domain="file" path="."/>
+        <exclude domain="database" path="."/>
+        <exclude domain="sharedpref" path="."/>
+        <exclude domain="external" path="."/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="."/>
+        <exclude domain="file" path="."/>
+        <exclude domain="database" path="."/>
+        <exclude domain="sharedpref" path="."/>
+        <exclude domain="external" path="."/>
+    </device-transfer>
+</data-extraction-rules>

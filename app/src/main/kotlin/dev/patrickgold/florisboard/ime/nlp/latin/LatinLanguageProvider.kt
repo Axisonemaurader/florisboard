@@ -17,6 +17,7 @@
 package dev.patrickgold.florisboard.ime.nlp.latin
 
 import android.content.Context
+import androidx.compose.ui.graphics.vector.ImageVector
 import dev.patrickgold.florisboard.appContext
 import dev.patrickgold.florisboard.ime.core.Subtype
 import dev.patrickgold.florisboard.ime.editor.EditorContent
@@ -24,56 +25,99 @@ import dev.patrickgold.florisboard.ime.nlp.SpellingProvider
 import dev.patrickgold.florisboard.ime.nlp.SpellingResult
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.SuggestionProvider
-import dev.patrickgold.florisboard.lib.devtools.flogDebug
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import org.florisboard.lib.android.readText
 import org.florisboard.lib.kotlin.guardedByLock
+import java.io.File
 
+/**
+ * Candidate produced by the autocorrect engine. [typed] is what the user actually typed, so a revert (backspace
+ * right after an auto-correction) can restore it and teach the engine to leave that word alone.
+ */
+data class AutocorrectCandidate(
+    override val text: CharSequence,
+    val typed: String,
+    val isKeepTyped: Boolean,
+    override val confidence: Double,
+    override val isEligibleForAutoCommit: Boolean,
+    override val sourceProvider: SuggestionProvider?,
+) : SuggestionCandidate {
+    override val secondaryText: CharSequence? = null
+    override val isEligibleForUserRemoval: Boolean = false
+    override val icon: ImageVector? = null
+}
+
+/**
+ * Offline English autocorrect + suggestions.
+ *
+ * PRIVACY: everything is local. The only file written is the learned-word list in `noBackupFilesDir`, which is
+ * excluded from Android cloud backup and device transfer by definition. Nothing is ever sent anywhere (the app
+ * does not hold the INTERNET permission).
+ */
 class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProvider {
     companion object {
         // Default user ID used for all subtypes, unless otherwise specified.
         // See `ime/core/Subtype.kt` Line 210 and 211 for the default usage
         const val ProviderId = "org.florisboard.nlp.providers.latin"
+
+        private const val LEARNED_FILE = "autocorrect_learned.json"
+        private const val MAX_LEARNED = 5000
     }
 
     private val appContext by context.appContext()
+    private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val wordData = guardedByLock { mutableMapOf<String, Int>() }
     private val wordDataSerializer = MapSerializer(String.serializer(), Int.serializer())
 
+    @Volatile
+    private var engine: AutocorrectEngine? = null
+
     override val providerId = ProviderId
 
     override suspend fun create() {
-        // Here we initialize our provider, set up all things which are not language dependent.
+        // Nothing language-independent to set up.
     }
 
+    private fun learnedFile(): File = File(appContext.noBackupFilesDir, LEARNED_FILE)
+
     override suspend fun preload(subtype: Subtype) = withContext(Dispatchers.IO) {
-        // Here we have the chance to preload dictionaries and prepare a neural network for a specific language.
-        // Is kept in sync with the active keyboard subtype of the user, however a new preload does not necessary mean
-        // the previous language is not needed anymore (e.g. if the user constantly switches between two subtypes)
-
-        // To read a file from the APK assets the following methods can be used:
-        // appContext.assets.open()
-        // appContext.assets.reader()
-        // appContext.assets.bufferedReader()
-        // appContext.assets.readText()
-        // To copy an APK file/dir to the file system cache (appContext.cacheDir), the following methods are available:
-        // appContext.assets.copy()
-        // appContext.assets.copyRecursively()
-
-        // The subtype we get here contains a lot of data, however we are only interested in subtype.primaryLocale and
-        // subtype.secondaryLocales.
-
         wordData.withLock { wordData ->
             if (wordData.isEmpty()) {
-                // Here we use readText() because the test dictionary is a json dictionary
                 val rawData = appContext.assets.readText("ime/dict/data.json")
                 val jsonData = Json.decodeFromString(wordDataSerializer, rawData)
                 wordData.putAll(jsonData)
+            }
+            if (engine == null) {
+                val e = AutocorrectEngine(wordData)
+                runCatching {
+                    val f = learnedFile()
+                    if (f.exists()) e.loadLearned(Json.decodeFromString(wordDataSerializer, f.readText()))
+                }
+                engine = e
+            }
+        }
+    }
+
+    private fun persistLearned() {
+        val e = engine ?: return
+        ioScope.launch {
+            runCatching {
+                val snapshot = e.learnedSnapshot().entries
+                    .sortedByDescending { it.value }
+                    .take(MAX_LEARNED)
+                    .associate { it.key to it.value }
+                val f = learnedFile()
+                val tmp = File(f.parentFile, "$LEARNED_FILE.tmp")
+                tmp.writeText(Json.encodeToString(wordDataSerializer, snapshot))
+                tmp.renameTo(f)
             }
         }
     }
@@ -87,15 +131,11 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         allowPossiblyOffensive: Boolean,
         isPrivateSession: Boolean,
     ): SpellingResult {
-        return when (word.lowercase()) {
-            // Use typo for typing errors
-            "typo" -> SpellingResult.typo(arrayOf("typo1", "typo2", "typo3"))
-            // Use grammar error if the algorithm can detect this. On Android 11 and lower grammar errors are visually
-            // marked as typos due to a lack of support
-            "gerror" -> SpellingResult.grammarError(arrayOf("grammar1", "grammar2", "grammar3"))
-            // Use valid word for valid input
-            else -> SpellingResult.validWord()
-        }
+        val e = engine ?: return SpellingResult.unspecified()
+        if (!AutocorrectEngine.isCorrectable(word) || e.isKnown(word)) return SpellingResult.validWord()
+        val result = e.process(word, maxSuggestionCount.coerceAtLeast(1))
+        return if (result.suggestions.isEmpty()) SpellingResult.validWord()
+        else SpellingResult.typo(result.suggestions.toTypedArray())
     }
 
     override suspend fun suggest(
@@ -105,34 +145,43 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         allowPossiblyOffensive: Boolean,
         isPrivateSession: Boolean,
     ): List<SuggestionCandidate> {
-        return emptyList()
-        /*val word = content.composingText.ifBlank { "next" }
-        val suggestions = buildList {
-            for (n in 0 until maxCandidateCount) {
-                add(WordSuggestionCandidate(
-                    text = "$word$n",
-                    secondaryText = if (n % 2 == 1) "secondary" else null,
-                    confidence = 0.5,
-                    isEligibleForAutoCommit = false,//n == 0 && word.startsWith("auto"),
-                    // We set ourselves as the source provider so we can get notify events for our candidate
-                    sourceProvider = this@LatinLanguageProvider,
-                ))
+        val e = engine ?: return emptyList()
+        val typed = content.composingText.ifBlank { content.currentWordText }
+        if (typed.isBlank() || !AutocorrectEngine.isCorrectable(typed)) return emptyList()
+        val result = e.process(typed, maxSuggestions = (maxCandidateCount - 1).coerceIn(1, 4))
+        return buildList {
+            val correction = result.correction
+            if (correction != null) {
+                add(AutocorrectCandidate(correction, typed, false, 0.9, true, this@LatinLanguageProvider))
+                // Let the user tap their original word to keep it (and teach the engine).
+                add(AutocorrectCandidate(typed, typed, true, 0.5, false, this@LatinLanguageProvider))
             }
-        }
-        return suggestions*/
+            for (s in result.suggestions) {
+                if (s == correction || s == typed) continue
+                add(AutocorrectCandidate(s, typed, false, 0.4, false, this@LatinLanguageProvider))
+            }
+        }.take(maxCandidateCount)
     }
 
     override suspend fun notifySuggestionAccepted(subtype: Subtype, candidate: SuggestionCandidate) {
-        // We can use flogDebug, flogInfo, flogWarning and flogError for debug logging, which is a wrapper for Logcat
-        flogDebug { candidate.toString() }
+        val c = candidate as? AutocorrectCandidate ?: return
+        val e = engine ?: return
+        if (c.isKeepTyped) {
+            // User explicitly chose their own spelling: trust it immediately.
+            e.learn(c.typed, AutocorrectEngine.TRUST_THRESHOLD)
+            persistLearned()
+        }
     }
 
     override suspend fun notifySuggestionReverted(subtype: Subtype, candidate: SuggestionCandidate) {
-        flogDebug { candidate.toString() }
+        val c = candidate as? AutocorrectCandidate ?: return
+        val e = engine ?: return
+        // Backspace right after an auto-correction = "I meant what I typed". Never correct it again.
+        e.learn(c.typed, AutocorrectEngine.TRUST_THRESHOLD)
+        persistLearned()
     }
 
     override suspend fun removeSuggestion(subtype: Subtype, candidate: SuggestionCandidate): Boolean {
-        flogDebug { candidate.toString() }
         return false
     }
 
@@ -145,7 +194,6 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
     }
 
     override suspend fun destroy() {
-        // Here we have the chance to de-allocate memory and finish our work. However this might never be called if
-        // the app process is killed (which will most likely always be the case).
+        // Process is usually killed before this is called.
     }
 }

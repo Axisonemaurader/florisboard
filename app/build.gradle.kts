@@ -177,6 +177,26 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
+// PRIVACY LOCK: fail the build if any network permission ends up in a final (merged) manifest,
+// e.g. pulled in by a future dependency. This app must never be able to open a socket.
+afterEvaluate {
+    tasks.matching { it.name.startsWith("process") && it.name.endsWith("MainManifest") }.configureEach {
+        doLast {
+            val forbidden = listOf(
+                "android.permission.INTERNET",
+                "android.permission.ACCESS_NETWORK_STATE",
+                "android.permission.ACCESS_WIFI_STATE",
+            )
+            outputs.files.asFileTree.matching { include("**/AndroidManifest.xml") }.forEach { manifest ->
+                val text = manifest.readText()
+                forbidden.filter { text.contains("\"$it\"") }.takeIf { it.isNotEmpty() }?.let {
+                    throw GradleException("PRIVACY LOCK violated: $it found in ${manifest.path}")
+                }
+            }
+        }
+    }
+}
+
 dependencies {
     val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)

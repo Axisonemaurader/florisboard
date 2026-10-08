@@ -8,6 +8,12 @@
     <!-- Permission needed to create notifications on devices running Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- PRIVACY LOCK: strip any network permission a library might try to merge in.
+         Without INTERNET the OS blocks every socket this app could open. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove"/>
+
     <!-- Android 11+ only: Define that FlorisBoard requests to see all apps that
           ship with an IME or Spell Check service. This is used to guide the user
           in the Settings Ui why FlorisBoard may not be working.
@@ -23,9 +29,9 @@
 
     <application
         android:name="dev.patrickgold.florisboard.FlorisApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:dataExtractionRules="@xml/backup_rules"
-        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/floris_app_icon"
         android:label="@string/floris_app_name"
         android:enableOnBackInvokedCallback="true"

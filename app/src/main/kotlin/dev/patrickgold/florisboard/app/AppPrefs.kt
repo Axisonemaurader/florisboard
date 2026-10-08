@@ -535,7 +535,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val heightFactorPortrait = int(
             key = "keyboard__height_factor_portrait",
-            default = 100,
+            default = 112, // Samsung-like: taller keys = bigger targets
         )
         val heightFactorLandscape = int(
             key = "keyboard__height_factor_landscape",
@@ -543,11 +543,11 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val keySpacingVertical = float(
             key = "keyboard__key_spacing_vertical",
-            default = 5.0f,
+            default = 3.0f, // was 5: less dead space, bigger key faces
         )
         val keySpacingHorizontal = float(
             key = "keyboard__key_spacing_horizontal",
-            default = 2.0f,
+            default = 1.5f, // was 2: wider key faces
         )
         val bottomOffsetPortrait = int(
             key = "keyboard__bottom_offset_portrait",
@@ -729,7 +729,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val enabled = boolean(
             key = "suggestion__enabled",
-            default = false,
+            default = true, // autocorrect on out of the box
         )
         val displayMode = enum(
             key = "suggestion__display_mode",
@@ -741,7 +741,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val incognitoMode = enum(
             key = "suggestion__incognito_mode",
-            default = IncognitoMode.DYNAMIC_ON_OFF,
+            default = IncognitoMode.FORCE_ON, // PRIVACY LOCK: value is ignored, incognito is hardcoded on
         )
         // Internal pref
         val forceIncognitoModeFromDynamic = boolean(

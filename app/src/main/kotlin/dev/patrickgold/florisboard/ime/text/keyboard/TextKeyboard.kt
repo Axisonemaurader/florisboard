@@ -40,7 +40,22 @@ class TextKeyboard(
                 return key
             }
         }
-        return null
+        // Fat-finger fallback (Samsung-style): a touch that lands in no key's area goes to the nearest key
+        // instead of being dropped.
+        var nearest: TextKey? = null
+        var nearestDist = Float.MAX_VALUE
+        for (key in keys()) {
+            val b = key.visibleBounds
+            if (b.width <= 0f || b.height <= 0f) continue
+            val dx = maxOf(b.left - pointerX, 0f, pointerX - b.right)
+            val dy = maxOf(b.top - pointerY, 0f, pointerY - b.bottom)
+            val d = dx * dx + dy * dy
+            if (d < nearestDist) {
+                nearestDist = d
+                nearest = key
+            }
+        }
+        return nearest
     }
 
     override fun layout(
@@ -145,6 +160,19 @@ class TextKeyboard(
                         if (extendTouchBoundariesDownwards && r + 1 == arrangement.size) {
                             bottom += height
                         }
+                    }
+                }
+            }
+        }
+        // Fat-finger fix: the vertical margin between rows used to be a dead zone where taps registered on no key.
+        // Split each gap between the row above and the row below so every pixel of the keyboard hits a key.
+        if (rowMarginV > 0f) {
+            val half = rowMarginV / 2.0f
+            for ((r, row) in rows().withIndex()) {
+                for (key in row) {
+                    key.touchBounds.apply {
+                        if (r > 0) top -= half
+                        if (r + 1 < arrangement.size) bottom += half
                     }
                 }
             }
