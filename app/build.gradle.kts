@@ -105,6 +105,19 @@ android {
         compose = true
     }
 
+    // Release signing: credentials live in ~/.gradle/gradle.properties, never in this repo.
+    val releaseStoreFile = findProperty("florisReleaseStoreFile") as String?
+    if (releaseStoreFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = findProperty("florisReleaseStorePassword") as String?
+                keyAlias = findProperty("florisReleaseKeyAlias") as String?
+                keyPassword = findProperty("florisReleaseKeyPassword") as String?
+            }
+        }
+    }
+
     buildTypes {
         named("debug") {
             applicationIdSuffix = ".debug"
@@ -135,6 +148,8 @@ android {
 
         named("release") {
             versionNameSuffix = projectVersionNameSuffix
+            if (releaseStoreFile != null) signingConfig = signingConfigs.getByName("release")
+            isDebuggable = false
 
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             isMinifyEnabled = true
