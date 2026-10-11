@@ -16,6 +16,9 @@
 
 package dev.patrickgold.florisboard.ime.nlp.latin
 
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -29,6 +32,8 @@ import kotlin.math.min
  * Scoring = word frequency bonus minus a weighted edit distance where hitting a *neighbouring* key costs much
  * less than hitting a random key. That is what makes `hwllo -> hello` and `yhe -> the` work while leaving
  * unknown-but-intentional words alone.
+ *
+ * Thread-safe: [process]/[isKnown] run concurrently (suggest + spell), [learn]/[unlearn] take exclusive access.
  */
 class AutocorrectEngine(dictionary: Map<String, Int>) {
 
@@ -53,6 +58,9 @@ class AutocorrectEngine(dictionary: Map<String, Int>) {
     /** User-learned words -> how often they were kept. Owned by the caller's storage, mirrored here. */
     private val learned = HashMap<String, Int>()
 
+    /** Guards [byLength] and [learned], which [learn]/[unlearn] mutate while [process] iterates them. */
+    private val lock = ReentrantReadWriteLock()
+
     init {
         for ((word, f) in dictionary) {
             if (word.isEmpty() || !word.all { it.isLetter() || it == '\'' }) continue
@@ -73,19 +81,23 @@ class AutocorrectEngine(dictionary: Map<String, Int>) {
     fun learn(word: String, weight: Int = 1) {
         val lw = word.lowercase()
         if (lw.length < 2 || lw.length > MAX_LEN || !lw.all { it.isLetter() || it == '\'' }) return
-        val old = learned[lw]
-        learned[lw] = (old ?: 0) + weight
-        if (old == null && !freq.containsKey(lw)) byLength[strip(lw).length].add(lw)
+        lock.write {
+            val old = learned[lw]
+            learned[lw] = (old ?: 0) + weight
+            if (old == null && !freq.containsKey(lw)) byLength[strip(lw).length].add(lw)
+        }
     }
 
     fun unlearn(word: String) {
         val lw = word.lowercase()
-        if (learned.remove(lw) != null && !freq.containsKey(lw)) byLength[strip(lw).length].remove(lw)
+        lock.write {
+            if (learned.remove(lw) != null && !freq.containsKey(lw)) byLength[strip(lw).length].remove(lw)
+        }
     }
 
-    fun learnedSnapshot(): Map<String, Int> = HashMap(learned)
+    fun learnedSnapshot(): Map<String, Int> = lock.read { HashMap(learned) }
 
-    fun loadLearned(data: Map<String, Int>) {
+    fun loadLearned(data: Map<String, Int>) = lock.write {
         for ((w, c) in data) learn(w, c)
     }
 
@@ -102,14 +114,16 @@ class AutocorrectEngine(dictionary: Map<String, Int>) {
 
     fun isKnown(word: String): Boolean {
         val lw = word.lowercase()
-        return freq.containsKey(lw) || isTrusted(lw)
+        return lock.read { freq.containsKey(lw) || isTrusted(lw) }
     }
 
     // ---------------------------------------------------------------------------------------------------------------
     // Correction
     // ---------------------------------------------------------------------------------------------------------------
 
-    fun process(typed: String, maxSuggestions: Int = 3): Result {
+    fun process(typed: String, maxSuggestions: Int = 3): Result = lock.read { processLocked(typed, maxSuggestions) }
+
+    private fun processLocked(typed: String, maxSuggestions: Int): Result {
         if (!isCorrectable(typed)) return Result(typed, null, emptyList(), true)
         val lower = typed.lowercase()
         val stripped = strip(lower)

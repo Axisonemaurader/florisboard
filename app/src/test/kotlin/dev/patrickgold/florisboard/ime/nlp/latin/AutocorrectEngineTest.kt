@@ -4,6 +4,9 @@ import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -78,6 +81,51 @@ class AutocorrectEngineTest {
         e.learn("zakk", AutocorrectEngine.TRUST_THRESHOLD)
         assertNull(e.process("zakk").correction)
         e.unlearn("zakk")
+    }
+
+    /**
+     * Regression: suggest() runs on Dispatchers.Default while notifySuggestionAccepted/Reverted call learn() from
+     * another thread. Without locking, rank() threw ConcurrentModificationException iterating byLength[len].
+     */
+    @Test
+    fun learnWhileProcessingIsThreadSafe() {
+        val e = engine
+        val failures = ConcurrentLinkedQueue<Throwable>()
+        val stop = AtomicBoolean(false)
+        // Same stripped lengths as "sonething" so every learn() lands in a bucket rank() is scanning.
+        fun word(i: Int) = "sonet" + (0 until 4).map { 'a' + (i shr (it * 4)) % 16 }.joinToString("")
+
+        val readers = List(4) {
+            thread {
+                try {
+                    while (!stop.get()) {
+                        e.process("sonething")
+                        e.isKnown("sonethinx")
+                    }
+                } catch (t: Throwable) {
+                    failures.add(t)
+                }
+            }
+        }
+        val writer = thread {
+            try {
+                for (i in 0 until 20_000) {
+                    e.learn(word(i))
+                    if (i % 3 == 0) e.unlearn(word(i / 2))
+                    if (i % 500 == 0) e.learnedSnapshot()
+                }
+            } catch (t: Throwable) {
+                failures.add(t)
+            } finally {
+                stop.set(true)
+            }
+        }
+        writer.join(60_000)
+        stop.set(true)
+        readers.forEach { it.join(10_000) }
+
+        assertTrue(failures.isEmpty(), "Concurrent access failed: ${failures.firstOrNull()}")
+        assertEquals("something", e.process("sonething").correction)
     }
 
     @Test
